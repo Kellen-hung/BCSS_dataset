@@ -163,7 +163,42 @@ if torch.cuda.device_count() > 1:
 
 model = model.to(device)
 
-criterion = nn.CrossEntropyLoss()
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1e-6):
+        super().__init__()
+        self.smooth = smooth
+    
+    def forward(self, pred, target):
+        pred = F.softmax(pred, dim=1)
+        
+        dice = 0.0
+        for c in range(pred.shape[1]):
+            pred_c = pred[:, c, :, :]
+            target_c = (target == c).float()
+            
+            intersection = (pred_c * target_c).sum()
+            union = pred_c.sum() + target_c.sum()
+            
+            dice += (2.0 * intersection + self.smooth) / (union + self.smooth)
+        
+        return 1 - dice / pred.shape[1]
+
+# 組合 Loss（CE + Dice）
+class CombinedLoss(nn.Module):
+    def __init__(self, alpha=0.5):
+        super().__init__()
+        self.ce_loss = nn.CrossEntropyLoss()
+        self.dice_loss = DiceLoss()
+        self.alpha = alpha
+    
+    def forward(self, pred, target):
+        ce = self.ce_loss(pred, target)
+        dice = self.dice_loss(pred, target)
+        return self.alpha * ce + (1 - self.alpha) * dice
+
+# 使用
+criterion = CombinedLoss(alpha=0.5)  # 可以調整 alpha
+
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
 num_epochs = 30
