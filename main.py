@@ -45,8 +45,12 @@ class BCSSDataset(Dataset):
             augmented = self.transform(image=image, mask=mask)
             image = augmented['image']
             mask = augmented['mask']
-            
-        mask = mask.long()
+            mask = mask.long()       
+        else:
+            # convert to tensor
+            image = torch.from_numpy(image).permute(0, 1, 2).float()  # HWC → HWC, still fine
+            image = image.permute(2, 0, 1)  # HWC → CHW
+            mask = torch.from_numpy(mask).long()   # segmentation 必須 long 型別
 
         return image, mask
     
