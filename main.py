@@ -82,8 +82,8 @@ val_dataset = BCSSDataset(
     transform=transforms_val
 )
 
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True, num_workers=16)
-val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=16)
+train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=16)
+val_loader = DataLoader(val_dataset, batch_size=16, shuffle=False, num_workers=16)
 
 # --- Basic building block ---
 class DoubleConv(nn.Module):
@@ -103,7 +103,7 @@ class DoubleConv(nn.Module):
 
 # --- Full UNet ---
 class UNet(nn.Module):
-    def __init__(self, in_channels=3, out_channels=22):
+    def __init__(self, in_channels=3, out_channels=21):
         super().__init__()
         
         # Encoder
@@ -157,10 +157,42 @@ class UNet(nn.Module):
 
         return self.out_conv(x)
 
+class DiceBCELoss(nn.Module):
+    def __init__(self, weight=None, size_average=True):
+        super(DiceBCELoss, self).__init__()
+        # CrossEntropy 會自動處理多類別
+        self.ce = nn.CrossEntropyLoss(weight=weight)
+
+    def forward(self, inputs, targets, smooth=1):
+        # inputs: (Batch, 22, 224, 224)
+        # targets: (Batch, 224, 224)
+        
+        # 1. 先算標準 CrossEntropy Loss
+        ce_loss = self.ce(inputs, targets)
+        
+        # 2. 接著算 Dice Loss
+        inputs_prob = F.softmax(inputs, dim=1) # 轉成機率
+        
+        # 自動將 target 轉成 (Batch, 22, 224, 224) 的 one-hot
+        # num_classes 會自動讀取 inputs 的 channel 數 (也就是 22)
+        targets_one_hot = F.one_hot(targets, num_classes=inputs.shape[1]).permute(0, 3, 1, 2).float()
+        
+        # 計算 Dice
+        intersection = (inputs_prob * targets_one_hot).sum(dim=(2, 3))
+        union = inputs_prob.sum(dim=(2, 3)) + targets_one_hot.sum(dim=(2, 3))
+        
+        dice = (2. * intersection + smooth) / (union + smooth)
+        
+        # Dice Loss = 1 - Mean Dice Score
+        dice_loss = 1 - dice.mean()
+        
+        # 3. 結合兩者 (可以嘗試調整權重，例如 0.5/0.5 或 0.7/0.3)
+        return 0.5 * ce_loss + 0.5 * dice_loss
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("device:", device)
 
-model = UNet(in_channels=3, out_channels=22)
+model = UNet(in_channels=3, out_channels=21)
 
 if torch.cuda.device_count() > 1:
     print("Using", torch.cuda.device_count(), "GPUs!")
@@ -168,15 +200,17 @@ if torch.cuda.device_count() > 1:
 
 model = model.to(device)
 
-criterion = nn.CrossEntropyLoss()
+# criterion = nn.CrossEntropyLoss()
+criterion = DiceBCELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=5, verbose=True)
 
 num_epochs = 50
 
 def pixel_accuracy(pred, mask):
     return (pred == mask).float().mean().item()
 
-def dice_coefficient(pred, mask, num_classes=3, eps=1e-6):
+def dice_coefficient(pred, mask, num_classes=21, eps=1e-6):
     dice = 0.0
     for c in range(num_classes):
         pred_c = (pred == c).float()
@@ -187,7 +221,7 @@ def dice_coefficient(pred, mask, num_classes=3, eps=1e-6):
     return (dice / num_classes).item()
 
 # 🆕 新增 IoU 計算
-def iou_score(pred, mask, num_classes=3, eps=1e-6):
+def iou_score(pred, mask, num_classes=21, eps=1e-6):
     """計算 IoU (Intersection over Union)"""
     iou = 0.0
     for c in range(num_classes):
@@ -290,6 +324,7 @@ for epoch in range(num_epochs):
         print(f"  ✓ Saved best model! Best Dice: {best_dice:.4f}")
     
     print("-" * 60)
+    scheduler.step(avg_dice)
 
 # ===== 🆕 訓練結束後畫圖 =====
 print("\n" + "="*60)
